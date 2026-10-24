@@ -60,12 +60,15 @@ const MCPS = ` MCP servers: to add one, edit ${path.resolve('mcp.json')} in the 
   + (process.platform === 'win32' ? `Invoke-RestMethod -Method Post -Headers @{Authorization="Bearer $env:TERIYAKI_TOKEN"} -Uri http://localhost:${PORT}/api/mcp -Body '{"action":"reload"}' | ConvertTo-Json -Depth 5` : `curl -s -X POST -H "Authorization: Bearer $TERIYAKI_TOKEN" http://localhost:${PORT}/api/mcp -d '{"action":"reload"}'`)
   + `\`, check the server's state in the answer, and use its tools (<server>__<tool>) from your next step.`;
 const SEARCH = ' For current or unfamiliar facts, use web search and name the source URLs in your answer.';
+// Speaking: an agent with speak reports aloud at the end of every turn that answers the user, a schedule's or a teammate's included.
+const SPEAK = ' Voice: in every turn that ends with an answer to the user (one woken by a schedule or a teammate\'s report too), call speak once, as your last tool call, with a concise spoken report: one or two short sentences with the outcome first and anything the user must do; then write your answer.'
+  + ' The spoken report is a headline, not a reading of the written answer. Speak nothing in a turn that says nothing to the user.';
 // The system prompt of agent a (its entry in team.json; have: the tools it may use). Each block is there only if the agent has the tool it talks about, so none is told of a tool it cannot call.
 // The MCP block, which edits mcp.json, is for the lead alone.
 const ctx = (a, have, s, note) => {
   const T = team.get(), has = n => n === 'web_search' ? a.tools.includes(n) : n in have, shell = has('shell'), roster = team.roster(T, a.id, { messaging: has('send_message') });
   return [{ role: 'system', content: (shell ? `You have a shell tool (${SH}). ` : '') + 'Check results before answering.'
-    + (has('web_search') ? SEARCH : '') + (shell ? work(a, Object.keys(T.agents).length > 1) : '') + files(has, a.user_facing)
+    + (has('web_search') ? SEARCH : '') + (shell ? work(a, Object.keys(T.agents).length > 1) : '') + files(has, a.user_facing) + (has('speak') ? SPEAK : '')
     + (shell ? memo(a) + SKILL + (a.id === T.lead ? MCPS : '') + skillNote(a) : '') + '\n'
     + ' Be brief: do only what was asked and report the result plainly. If blocked or unclear, say so in one sentence.'
     + `\nYour name: ${a.name}. Your role: ${a.role}` + (a.prompt ? '\n' + a.prompt : '') + (roster ? '\n' + roster : '')

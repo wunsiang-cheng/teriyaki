@@ -7,6 +7,7 @@ const MODEL = 'openai/gpt-6-luna-pro';   // the chat model: it must accept image
 const VISION_MODEL = 'openai/gpt-6-luna';   // the view_image model: it must accept images
 const TRANSCRIBE_MODEL = 'google/gemini-3.5-transcribe';   // the transcribe model: a speech-to-text model, which OpenRouter serves at /audio/transcriptions rather than /chat/completions
 const MEDIA_MODEL = 'google/gemini-3.8-flash';   // the listen_audio and watch_video model: it must accept audio and video
+const SPEECH_MODEL = 'google/gemini-3.8-flash-lite-tts';   // the speak model: a text-to-speech model, which OpenRouter serves at /audio/speech
 
 const db = new DatabaseSync('agent.db');
 db.exec(`PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;   -- a write waits for a reader of agent.db (a backup, a viewer, a test) instead of failing at once
@@ -30,7 +31,8 @@ if (db.prepare('PRAGMA user_version').get().user_version < 2) tx(() => db.exec(`
 const OR = env.OPENROUTER_BASE || 'https://openrouter.ai/api/v1', auth = { Authorization: 'Bearer ' + env.OPENROUTER_API_KEY, 'Content-Type': 'application/json' };   // OPENROUTER_BASE is for the tests, which point it at a fake model service
 
 // Images live in uploads/ (MCP tool images); messages only carry their paths and are turned into base64 parts per request.
-const UP = /^uploads\/[\w-]+\.(webp|jpg|png|gif)$/, MIME = { webp: 'image/webp', jpg: 'image/jpeg', png: 'image/png', gif: 'image/gif' };
+const UP = /^uploads\/[\w-]+\.(webp|jpg|png|gif)$/, MIME = { webp: 'image/webp', jpg: 'image/jpeg', png: 'image/png', gif: 'image/gif', wav: 'audio/wav', mp3: 'audio/mpeg' };
+const VOICE = /^uploads\/[\w-]+\.(wav|mp3)$/;   // what the agent said with speak: uploads/<uuid>.wav, served inline so the page can play it
 fs.mkdirSync('uploads', { recursive: true });
 const dataUrl = p => `data:${MIME[p.split('.').pop()]};base64,${fs.readFileSync(p).toString('base64')}`;
 
@@ -133,4 +135,4 @@ const pages = new Set(), emit = (sid, type, o = {}) => { const d = `data: ${JSON
 const line = (sid, text, cls = 's', run = false) => { emit(sid, 'line', { text, cls, ...run && { run } }); if (cls === 'e') console.error(`[${sid}] ${text}`); };   // also logged: an unattended turn may have no page watching
 const add = (s, m) => { s.msgs.push(m); store(s); emit(s.id, 'msg', { msg: m }); };   // saved per message, so a crash loses at most the running step
 
-module.exports = { env, PORT, MODEL, VISION_MODEL, TRANSCRIBE_MODEL, MEDIA_MODEL, db, OR, auth, UP, MIME, dataUrl, FILE, MAX_FILE, safeName, newFileDir, loadSession, store, createRun, adopt, runSessions, sessionOf, renameRun, deleteRun, bump, touch, runRow, allRuns, post, mailLog, mailFor, delivered, mailIn, hasMail, lastMail, waiting, dropMail, turnBegan, turnEnded, cutShort, pages, emit, line, add };
+module.exports = { env, PORT, MODEL, VISION_MODEL, TRANSCRIBE_MODEL, MEDIA_MODEL, SPEECH_MODEL, db, OR, auth, UP, VOICE, MIME, dataUrl, FILE, MAX_FILE, safeName, newFileDir, loadSession, store, createRun, adopt, runSessions, sessionOf, renameRun, deleteRun, bump, touch, runRow, allRuns, post, mailLog, mailFor, delivered, mailIn, hasMail, lastMail, waiting, dropMail, turnBegan, turnEnded, cutShort, pages, emit, line, add };

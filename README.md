@@ -11,7 +11,7 @@ cp .env.example .env     # put your key and a PIN in .env
 node server.js
 ```
 
-Open http://localhost:3000 and enter the PIN. `/help` lists the commands. Models are set in `core.js`: `MODEL` for chat (the default: an agent's `model` in `team.json` replaces it), `VISION_MODEL` for `view_image`, `TRANSCRIBE_MODEL` for `transcribe` and `MEDIA_MODEL` for `listen_audio` and `watch_video`.
+Open http://localhost:3000 and enter the PIN. `/help` lists the commands. Models are set in `core.js`: `MODEL` for chat (the default: an agent's `model` in `team.json` replaces it), `VISION_MODEL` for `view_image`, `TRANSCRIBE_MODEL` for `transcribe`, `MEDIA_MODEL` for `listen_audio` and `watch_video`, and `SPEECH_MODEL` for `speak`, with which the lead ends each turn with a short spoken report that plays in the page (`/voice` turns the playing off, Esc stops it).
 
 - `OPENROUTER_API_KEY`: required.
 - `PIN`: required. The page asks for it once per browser, and again after a server restart. The agent runs shell commands, so use 6+ characters you would not guess. It travels over plain HTTP: fine at home, not on a shared network.

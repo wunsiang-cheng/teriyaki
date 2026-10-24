@@ -22,6 +22,7 @@
   .md .h{font-size:1em}.md ul,.md ol{padding-left:3ch}.md li ul,.md li ol{margin:0}
   .md blockquote{border-left:2px solid var(--line);padding-left:1ch;color:var(--dim)}.md hr{border:0;border-top:1px solid var(--line)}
   .md a{color:var(--hi)}.md s{color:var(--dim)}.tbl{overflow-x:auto}.md table{border-collapse:collapse}.md th,.md td{border:1px solid var(--line);padding:0 1ch;text-align:left;vertical-align:top}.md th{color:var(--hi)}
+  audio{height:32px;max-width:100%;margin:2px 0;color-scheme:dark;vertical-align:top}
   .code{white-space:pre;overflow-x:auto;border:1px solid var(--line);padding:4px 1ch;margin:8px 0}
   #row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:6px}
   #in{flex:1;background:none;border:0;color:inherit;font:inherit;font-size:16px;outline:none}#in::placeholder{color:var(--dim)}   /* 16px: iOS Safari zooms the page when an input smaller than that gets focus */
@@ -175,7 +176,7 @@ function gone(id) {   // a run was deleted, here or in another page: the one nex
 }
 const cmdOf = c => { try { const a = JSON.parse(c.function.arguments); return c.function.name === 'shell' ? a.command : [c.function.name, ...Object.values(a).filter(v => typeof v !== 'object')].join(' '); } catch { return c.function.arguments; } };   // as in tools.js
 const sched = s => `[schedule #${s.id}${s.session ? ' · ' + s.session : ''} · next ${s.next_run}${s.every_minutes ? ' · every ' + s.every_minutes + ' min' : ''}] ${s.prompt}`;
-const fmt = r => r.error ? 'error: ' + r.error : r.schedules ? r.schedules.map(sched).join('\n') || '[no schedules]' : r.next_run ? sched(r) : r.file ? `sent ${r.file.path.split('/').pop()} · ${size(r.file.size)}` : 'text' in r ? r.text : !('exit_code' in r) ? JSON.stringify(r) :[r.stdout, r.stderr && '[stderr]\n' + r.stderr, r.note, `[exit ${r.exit_code} · ${(r.duration_ms / 1000).toFixed(1)}s]`].filter(Boolean).join('\n');
+const fmt = r => r.error ? 'error: ' + r.error : r.schedules ? r.schedules.map(sched).join('\n') || '[no schedules]' : r.next_run ? sched(r) : r.speech ? `said: "${r.said}"${r.seconds ? ` · ${r.seconds} s` : ''}` : r.file ? `sent ${r.file.path.split('/').pop()} · ${size(r.file.size)}` : 'text' in r ? r.text : !('exit_code' in r) ? JSON.stringify(r) :[r.stdout, r.stderr && '[stderr]\n' + r.stderr, r.note, `[exit ${r.exit_code} · ${(r.duration_ms / 1000).toFixed(1)}s]`].filter(Boolean).join('\n');
 const fmtMsg = m => { try { return fmt(JSON.parse(m.content)); } catch { return m.content; } };
 // Chips: an image opens in a new tab; a file is never previewed, whatever its type: the link downloads it.
 const size = n => n >= 1048576 ? +(n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
@@ -189,6 +190,12 @@ const chipsOf = m => [...(m.images || []).map(p => {
   return a;
 }), ...(m.files || []).map(fileChip)];
 const chips = m => { const c = chipsOf(m); if (c.length) out(c, 's'); };
+// Speech: what an agent said with speak plays once, as it arrives, if it comes from the run in view; a player below its step replays it. /voice turns the playing off, Esc stops it.
+let voiceOn = kept('voice') !== '0', speaking = null;
+const speechOf = m => { if (m.role !== 'tool') return null; try { const p = JSON.parse(m.content).speech; return typeof p === 'string' ? p : null; } catch { return null; } };
+const hush = () => { speaking?.pause(); speaking = null; };
+const say = (p, a = new Audio('/' + p)) => { if (!voiceOn) return; hush(); speaking = a; a.onended = () => speaking === a && (speaking = null); a.play().catch(() => {}); };   // a page with no click or key yet may not play (autoplay policy)
+const player = p => { const a = el('audio'); a.controls = true; a.preload = 'none'; a.src = '/' + p; return a; };
 const isAuto = c => /^\[(background job|tool image|schedule #|team (message|notice) from|dispatch #)/.test(c);   // messages the server adds as role user (dispatch # only for notices stored by the removed dispatch tool)
 const show = m => {
   if (m.role === 'user') { isAuto(m.content) ? out(m.content, 's') : out('> ' + m.content, 'u'); chips(m); }
@@ -198,6 +205,7 @@ const show = m => {
     if (d) { d.classList.toggle('e', !!(r.error || r.exit_code)); d.append(el('div', t)); }   // a failed step turns red
     else out(t, 's');   // its call was compacted away
     if (typeof r?.file?.path === 'string') out([fileChip(r.file)], 's');   // a file the agent sent: a chip below its step, not folded away
+    if (typeof r?.speech === 'string') out([player(r.speech)], 's');   // what it said: a player below its step
   }
   else {
     if (m.content) out(md(m.content), 'md');
@@ -240,13 +248,14 @@ const tick = () => {
 
 // Stopping is for the run: every agent of it, and the mail waiting for them (or one agent, and the mail waiting for it). Esc closes an open menu first.
 const stopRun = agent => call('POST', `/api/runs/${db.run}/abort` + (agent ? '?agent=' + agent : ''));
-document.addEventListener('keydown', e => { if (e.key === 'Escape') menuOpen() ? setMenu(false) : db.run && stopRun().catch(() => {}); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { hush(); menuOpen() ? setMenu(false) : db.run && stopRun().catch(() => {}); } });
 $('stop').onclick = () => stopRun().catch(e => out('error: ' + e.message, 'e'));
 
 const find = x => agents().find(a => a.id === x || a.name.toLowerCase() === x.toLowerCase());
 const cmds = {
-  help: () => out('/new [name]  /ls  /use N  /rm N  /rename NAME  /view [AGENT]  /team [reload]  /stop [AGENT]  /schedules [cancel ID]  /mcp [reload | restart NAME]  /compact  /clear  /sound  /help  ·  [+] attach files (or drop or paste them)', 's'),
+  help: () => out('/new [name]  /ls  /use N  /rm N  /rename NAME  /view [AGENT]  /team [reload]  /stop [AGENT]  /schedules [cancel ID]  /mcp [reload | restart NAME]  /compact  /clear  /sound  /voice  /help  ·  [+] attach files (or drop or paste them)', 's'),
   sound: () => { mute = !mute; try { localStorage.mute = +mute; } catch {} out('sound ' + (mute ? 'off' : 'on'), 's'); },
+  voice: () => { voiceOn = !voiceOn; keep('voice', voiceOn ? undefined : '0'); if (!voiceOn) hush(); out('voice ' + (voiceOn ? 'on: spoken reports play as they arrive' : 'off: spoken reports only get a player'), 's'); },
   new: a => newRun(a.trim()),
   ls: () => db.runs.forEach((r, i) => out(`${r.id === db.run ? '*' : ' '} ${i + 1}. ${r.name} (${db.sessions.filter(s => s.run_id === r.id).reduce((n, s) => n + s.msgs.length, 0)} msgs)${working(r.id).length ? ' · running' : ''}`, 's')),
   use: async a => { const r = db.runs[a - 1]; if (!r) return out('no such run', 'e'); call('POST', `/api/runs/${r.id}/use`).catch(() => {}); enter(r.id); },   // the server notes it, so that a reload opens this run
@@ -375,6 +384,7 @@ function onEvent({ sid, type, ...d }) {
   if (type === 'delta') { if (cur) { live ||= out([], 'md'); live.raw = (live.raw || '') + d.text; painting ||= setTimeout(paint, 50); } }   // the reply so far, drawn as markdown every 50ms at most (a timer, not requestAnimationFrame: that stops in a background tab)
   else if (type === 'msg') {
     s.msgs.push(d.msg);
+    const sp = speechOf(d.msg); if (sp && s.run_id === db.run) say(sp);
     if (cur) { seen[s.id] = s.msgs.length; live?.remove(); live = null; show(d.msg); bar(); }
     else {
       bar();

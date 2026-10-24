@@ -1,7 +1,7 @@
 // Zero-dep server: serves public/ and the HTTP API. The agent loop (agent.js) runs in here, so turns and schedules need no open page; the key stays server-side.
 // Modules: core.js (settings, SQLite, events), tools.js (the model's tools), docs.js and pdf.js (the text of PDF, Office and text files, for read_file), mcp.js (tools from MCP servers in mcp.json, stdio or HTTP), team.js (the agents in team.json), agent.js (the loop and schedules).
 const http = require('http'), fs = require('fs'), path = require('path'), { randomUUID, createHash, timingSafeEqual } = require('crypto'), { pipeline } = require('stream/promises');
-const { env, PORT, db, OR, auth, UP, MIME, FILE, MAX_FILE, safeName, newFileDir, loadSession, store, createRun, adopt, runSessions, renameRun, bump, touch, runRow, allRuns, mailLog, pages, emit } = require('./core');
+const { env, PORT, db, OR, auth, UP, VOICE, MIME, FILE, MAX_FILE, safeName, newFileDir, loadSession, store, createRun, adopt, runSessions, renameRun, bump, touch, runRow, allRuns, mailLog, pages, emit } = require('./core');
 const { schedules, tools } = require('./tools'), { running, start, ask, compact, repair, recover, resume, tick, stop, remove, paused } = require('./agent');
 const mcp = require('./mcp'), team = require('./team');
 const PIN = env.PIN, MAX_FILES = 10;   // files per message
@@ -179,8 +179,8 @@ const handle = async (req, res) => {
     const r = await mcp.reload(a.action === 'restart' ? a.name : undefined); return json(r, r.error ? 400 : 200);
   }
 
-  // uploads/<uuid>.<ext> holds MCP tool images, served inline.
-  if (req.method === 'GET' && UP.test(req.url.slice(1))) {
+  // uploads/<uuid>.<ext> holds MCP tool images and what the agent said with speak, served inline.
+  if (req.method === 'GET' && (UP.test(req.url.slice(1)) || VOICE.test(req.url.slice(1)))) {
     const p = req.url.slice(1);
     return fs.readFile(p, (err, data) => err ? (res.writeHead(404), res.end()) : (res.writeHead(200, { 'Content-Type': MIME[p.split('.').pop()], 'X-Content-Type-Options': 'nosniff' }), res.end(data)));
   }
