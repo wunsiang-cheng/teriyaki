@@ -1,0 +1,9 @@
+.env
+mcp.json
+agent.db*
+uploads/
+workspace/
+MEMORY.md
+skills/
+team.json
+memory/

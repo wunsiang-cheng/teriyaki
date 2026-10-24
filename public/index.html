@@ -1,0 +1,403 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agent</title>
+<style>
+  :root{--bg:#0a0f0a;--fg:#33ff66;--hi:#9dffb5;--dim:#778877;--line:#1d3a22;--err:#ff5555;--warn:#ffcc33}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Courier New",monospace}
+  body{display:flex;flex-direction:column;height:100dvh;max-width:900px;margin:0 auto;padding:8px;box-sizing:border-box}
+  [hidden]{display:none!important}
+  #bar{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:14px;border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:6px}
+  #view{position:relative;flex:none}#info{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #cur,#stop{margin:0;font-size:14px}#stop{flex:none}
+  #menu{position:absolute;left:0;top:100%;z-index:5;margin-top:4px;min-width:30ch;max-width:calc(100vw - 16px);background:var(--bg);border:1px solid var(--fg)}   /* the CRT overlay (z-index 9) still lies over it */
+  .item{display:flex;gap:1ch;width:100%;box-sizing:border-box;background:none;border:0;color:var(--fg);font:inherit;font-size:15px;padding:2px 1ch;text-align:left;cursor:pointer}
+  .item:hover,.item:focus-visible{background:var(--line);outline:none}.item.on{color:var(--hi)}.item.busy .dot,.item .new{color:var(--warn)}
+  .item .dot,.item .new{flex:none;width:1ch}.item .role{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+  #log{flex:1;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+  .u,.h,code{color:var(--hi)}.u{margin-top:1em}.s{color:var(--dim)}.w{color:var(--warn)}.e{color:var(--err)}
+  .step{font-size:16px}.step summary{cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.step[open] summary{white-space:pre-wrap}
+  .step>div{max-height:40vh;overflow:auto;border-left:1px solid var(--line);padding-left:1ch;margin:2px 0 6px}
+  .md>*,.md blockquote>*{margin:.5em 0}.md>:first-child,.md blockquote>:first-child{margin-top:0}.md>:last-child,.md blockquote>:last-child{margin-bottom:0}
+  .md .h{font-size:1em}.md ul,.md ol{padding-left:3ch}.md li ul,.md li ol{margin:0}
+  .md blockquote{border-left:2px solid var(--line);padding-left:1ch;color:var(--dim)}.md hr{border:0;border-top:1px solid var(--line)}
+  .md a{color:var(--hi)}.md s{color:var(--dim)}.tbl{overflow-x:auto}.md table{border-collapse:collapse}.md th,.md td{border:1px solid var(--line);padding:0 1ch;text-align:left;vertical-align:top}.md th{color:var(--hi)}
+  .code{white-space:pre;overflow-x:auto;border:1px solid var(--line);padding:4px 1ch;margin:8px 0}
+  #row{display:flex;align-items:center;gap:6px;border-top:1px solid var(--line);padding-top:6px}
+  #in{flex:1;background:none;border:0;color:inherit;font:inherit;font-size:16px;outline:none}#in::placeholder{color:var(--dim)}   /* 16px: iOS Safari zooms the page when an input smaller than that gets focus */
+  .chip{background:none;border:1px solid var(--line);color:inherit;font:inherit;padding:0 1ch;cursor:pointer}
+  .chip{font-size:16px;margin:2px 6px 2px 0;display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:top;text-decoration:none}
+  .chip:hover,.chip:focus-visible{border-color:var(--fg);outline:none}
+  #att{display:flex;flex-wrap:wrap;margin-bottom:4px}#att:empty{display:none}#clip{margin:0}
+  .chip.fx{display:inline-flex;box-sizing:border-box;max-width:calc(100% - 6px)}.fx>:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis}.fx>:last-child{flex:none;white-space:pre}   /* a long name is cut, its size and × stay */
+  /* CRT: phosphor glow, scanlines + vignette overlay that never takes clicks, block caret (falls back to the thin one where unsupported) */
+  html,body{text-shadow:0 0 4px currentColor}
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;animation:flicker 4s infinite;
+    background:repeating-linear-gradient(rgba(0,0,0,.18) 0 1px,transparent 1px 3px),radial-gradient(ellipse at center,transparent 60%,rgba(0,0,0,.45))}
+  @keyframes flicker{0%,100%{opacity:1}50%{opacity:.94}52%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){body::after{animation:none}}
+  #in{caret-color:var(--hi);caret-shape:block}#row>span{color:var(--hi)}
+</style>
+<div id="bar"><div id="view" hidden><button id="cur" class="chip" type="button" aria-haspopup="true" aria-expanded="false" title="the agents of this run"></button><div id="menu" role="menu" hidden></div></div><div id="info"></div><button id="stop" class="chip" type="button" title="stop every agent of this run (Esc)" hidden>stop</button></div>
+<div id="log"></div>
+<div id="att"></div>
+<div id="row"><span>&gt;</span><input id="in" placeholder="message or /help" autofocus autocomplete="off" enterkeyhint="send"><button id="clip" class="chip" type="button" title="attach files" aria-label="attach files">+</button></div>
+<input id="pick" type="file" multiple hidden>
+<script>
+// The agent loop runs on the server; this page sends input and draws the server's events.
+const $ = id => document.getElementById(id), log = $('log');
+let busy = new Set(), live = null;              // sessions with a turn running on the server; the line streaming the current reply
+let steps = {};                                 // tool_call_id -> its folded step, so the result lands in the call that asked for it
+// Mirror of the server's state, kept current by its events: the team, the runs, every session of the team, the messages between the agents.
+// run: the run in view. view: the agent in view (its id), or MAIL, the team's messages (an id that no agent can have).
+const MAIL = '@mail', db = { team: null, runs: [], sessions: [], mail: [], run: null, view: null };
+const seen = {}, newMail = new Set();   // session id -> how many of its messages were in view last (more means news); runs with messages between the agents that were not
+const call = async (method, url, body) => { const r = await fetch(url, { method, body: body && JSON.stringify(body) }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.status); return j; };
+const keep = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage[k] = v; } catch {} }, kept = k => { try { return localStorage[k]; } catch {} };   // localStorage can be off: then nothing is remembered
+const agents = () => db.team?.agents || [], agentOf = id => agents().find(a => a.id === id), views = () => [...agents().map(a => a.id), MAIL];
+const sessionOf = (run, agent) => db.sessions.find(s => s.run_id === run && s.agent === agent), mailOf = run => db.mail.filter(m => m.run_id === run);
+const R = () => db.runs.find(r => r.id === db.run), S = () => sessionOf(db.run, db.view), A = () => agentOf(db.view);   // the run, session and agent in view (the team's messages have no session)
+const working = run => agents().filter(a => busy.has(sessionOf(run, a.id)?.id));   // the agents of a run with a turn running
+const isBusy = () => busy.has(S()?.id), canWrite = () => !!A()?.user_facing;   // only an agent the user talks to takes messages and files
+const unread = s => !!s && s.id !== S()?.id && s.msgs.length > (seen[s.id] ?? 0);
+const hint = () => !db.team || canWrite() ? 'message or /help' : `read-only view · switch to ${agentOf(db.team.lead).name} to chat`;
+const writable = () => canWrite() || (out(db.team ? `[${hint()}]` : '[not connected yet]', 's'), false);   // says why not, when it is not
+const tok = () => { const s = S(); return s ? Math.ceil((s.summary.length + s.msgs.reduce((n, m) => n + m.content.length + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0), 0)) / 3) : 0; };   // shortcut: chars/3 estimate, swap for real usage counts if needed
+
+function out(text, cls = '') { const d = document.createElement('div'); d.className = cls; typeof text === 'string' ? d.textContent = text : d.append(...text); log.append(d); log.scrollTop = log.scrollHeight; return d; }   // text: a string, or nodes and strings
+const el = (tag, text = '', cls = '') => Object.assign(document.createElement(tag), { textContent: text, className: cls });
+// Markdown as DOM nodes, built from textContent so nothing in a reply becomes HTML.
+// Blocks: ``` fences (an unclosed one runs to the end of the text, as in a reply still streaming), # headings, ---, > quotes, nested - * + and 1. lists, | tables, paragraphs (single newlines stay line breaks).
+// Inline: **bold**, *italic*, ~~strike~~, `code`, [links](url) and bare URLs. Only http(s) and mailto become links, and an image is just a link, so a reply cannot make the page fetch anything.
+const INL = /`([^`\n]+)`|(!?)\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)(?:[^\s()]|\([^\s()]*\))+)\)|\*\*([^\s*](?:[^*\n]*[^\s*])?)\*\*|~~([^~\n]+)~~|\*([^\s*](?:[^*\n]*[^\s*])?)\*|\b_([^\s_](?:[^_\n]*[^\s_])?)_\b|(https?:\/\/[^\s<>]*[^\s<>.,;:!?'")\]])/gi;   // groups: code, !, link text, url, bold, strike, *em*, _em_, bare url
+const node = (tag, kids, cls = '') => { const n = el(tag, '', cls); n.append(...kids); return n; };
+const inline = (s, inLink) => {
+  const r = []; let i = 0;
+  for (const m of s.matchAll(INL)) {
+    const [all, code, bang, text, url, b, del, e1, e2, bare] = m;
+    if (bare && inLink) continue;   // a URL inside link text stays text
+    r.push(s.slice(i, m.index)); i = m.index + all.length;
+    const a = url && Object.assign(node('a', bang ? [`[image: ${text}]`] : inline(text, true)), { href: url, target: '_blank', rel: 'noopener noreferrer' });
+    r.push(code != null ? el('code', code) : a || (b ? node('b', inline(b)) : del ? node('s', inline(del)) : bare ? Object.assign(node('a', [bare]), { href: bare, target: '_blank', rel: 'noopener noreferrer' }) : node('i', inline(e1 || e2))));
+  }
+  r.push(s.slice(i)); return r;
+};
+const LI = /^(\s*)([-*+]|\d+[.)])\s+(.*)/, HR = /^\s*([-*_])(\s*\1){2,}\s*$/, HD = /^(#{1,6})\s+(.*)/, SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+const cells = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+const isTable = (L, i) => L[i].includes('|') && !!L[i + 1]?.includes('|') && SEP.test(L[i + 1]);
+const starts = (L, i) => HD.test(L[i]) || HR.test(L[i]) || /^\s*>/.test(L[i]) || LI.test(L[i]) || isTable(L, i);   // lines that end a paragraph
+// A list from line i, items nested by indent; returns [node, next line]. A blank line between items does not end it. A new list of the other kind at the same indent does.
+function list(L, i) {
+  const first = L[i].match(LI), ind = first[1].length, ol = /\d/.test(first[2]), ul = el(ol ? 'ol' : 'ul');
+  if (ol && parseInt(first[2]) !== 1) ul.start = parseInt(first[2]);   // "1. a / text / 2. b" split by a fence keeps counting
+  for (;;) {
+    let j = i; while (j < L.length && !L[j].trim()) j++;
+    const m = L[j]?.match(LI);
+    if (!m || m[1].length < ind || (m[1].length === ind && /\d/.test(m[2]) !== ol)) break;
+    i = j;
+    if (m[1].length > ind) { const [sub, k] = list(L, i); (ul.lastElementChild || ul.appendChild(el('li'))).append(sub); i = k; continue; }
+    const li = node('li', inline(m[3])); ul.append(li); i++;
+    while (i < L.length && L[i].trim() && !LI.test(L[i]) && L[i].match(/^\s*/)[0].length > ind) li.append(' ', ...inline(L[i++].trim()));   // wrapped item text
+  }
+  return [ul, i];
+}
+function table(L, i) {
+  const al = cells(L[i + 1]).map(c => c.endsWith(':') ? c.startsWith(':') ? 'center' : 'right' : c.startsWith(':') ? 'left' : '');
+  const row = (l, tag) => node('tr', cells(l).map((c, j) => { const d = node(tag, inline(c)); d.style.textAlign = al[j] || ''; return d; }));
+  const body = node('tbody', []), t = node('table', [node('thead', [row(L[i], 'th')]), body]);
+  for (i += 2; i < L.length && L[i].trim() && L[i].includes('|'); i++) body.append(row(L[i], 'td'));
+  return [node('div', [t], 'tbl'), i];   // the wrapper scrolls a wide table sideways
+}
+function block(t) {
+  const L = t.split('\n'), r = []; let i = 0, m;
+  while (i < L.length) {
+    const l = L[i];
+    if (!l.trim()) i++;
+    else if (m = l.match(HD)) { r.push(node('h' + m[1].length, inline(m[2].replace(/\s+#+\s*$/, '')), 'h')); i++; }
+    else if (HR.test(l)) { r.push(el('hr')); i++; }
+    else if (/^\s*>/.test(l)) { const q = []; while (i < L.length && /^\s*>/.test(L[i])) q.push(L[i++].replace(/^\s*> ?/, '')); r.push(node('blockquote', md(q.join('\n')))); }
+    else if (LI.test(l)) { const [ul, j] = list(L, i); r.push(ul); i = j; }
+    else if (isTable(L, i)) { const [tb, j] = table(L, i); r.push(tb); i = j; }
+    else { const p = [l]; for (i++; i < L.length && L[i].trim() && !starts(L, i); i++) p.push(L[i]); r.push(node('p', inline(p.join('\n').trim()))); }
+  }
+  return r;
+}
+const md = t => t.split(/^[ \t]*```[^\n]*\n([\s\S]*?)(?:^[ \t]*```[ \t]*$|(?![\s\S]))/m).flatMap((x, i) => i % 2 ? [el('div', x.replace(/\n$/, ''), 'code')] : block(x));
+// A folded line: closed it shows one line cut with an ellipsis, open it wraps in full.
+const fold = head => { const d = el('details', '', 's step'); d.append(el('summary', head)); log.append(d); log.scrollTop = log.scrollHeight; return d; };
+const k = n => n >= 1e6 ? +(n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? +(n / 1e3).toFixed(1) + 'k' : n;
+// The header, patched in place. The menu is built once for a team (buildMenu) and only its items' text and classes change here, so a menu that is open stays open while the agents work.
+function bar() {
+  $('view').hidden = !db.team || !R(); if ($('view').hidden) return;
+  const s = S(), a = A(), now = working(db.run), n = tok(), max = a?.compact_at_tokens, pct = n / max * 100;
+  // The limit is the auto-compact trigger (the agent's compact_at_tokens), not the context window; the count turns yellow, then red, as the session nears auto-compaction.
+  $('info').replaceChildren(R().name + ' · ', s ? el('span', `~${k(n)}/${k(max)}`, pct >= 100 ? 'e' : pct >= 75 ? 'w' : '') : `${mailOf(db.run).length} messages`, now.length ? ` · ${now.map(x => x.name).join(', ')} working` : '');
+  $('stop').hidden = !now.length;
+  patchMenu();
+  if (!pinTry) $('in').placeholder = hint();
+}
+let menuKey = '';
+function buildMenu() {
+  const items = [...agents().map(a => [a.id, a.name, a.role]), [MAIL, 'Team messages', '']], key = JSON.stringify(items);
+  if (key === menuKey) return; menuKey = key;   // the same team: keep the menu, open or not
+  $('menu').replaceChildren(...items.map(([id, name, role]) => {
+    const b = el('button', '', 'item'); b.type = 'button'; b.dataset.view = id; b.setAttribute('role', 'menuitem');
+    b.append(el('span', '', 'dot'), el('span', name), el('span', role && '· ' + role, 'role'), el('span', '', 'new'));
+    b.onclick = () => go(id);
+    return b;
+  }));
+}
+function patchMenu() {
+  let news = false;   // an agent out of view has news
+  for (const b of $('menu').children) {
+    const id = b.dataset.view, s = sessionOf(db.run, id), fresh = id === MAIL ? newMail.has(db.run) : unread(s), [dot, , , mark] = b.children;
+    news ||= fresh && id !== db.view;
+    dot.textContent = id === MAIL ? '' : busy.has(s?.id) ? '●' : '○'; mark.textContent = fresh ? '*' : '';
+    b.classList.toggle('on', id === db.view); b.classList.toggle('busy', busy.has(s?.id)); b.setAttribute('aria-current', String(id === db.view));
+  }
+  $('cur').textContent = (A()?.name || 'Team messages') + (news ? ' *' : '') + ' ▾';
+}
+const menuOpen = () => !$('menu').hidden, setMenu = on => { $('menu').hidden = !on; $('cur').setAttribute('aria-expanded', String(on)); };
+$('cur').onclick = () => setMenu(!menuOpen());
+addEventListener('click', e => { if (!$('view').contains(e.target)) setMenu(false); });
+// Shows a view of a run (the run remembers it: coming back to the run, or a reload, opens the same view). enter: a run, on the view it was left on.
+function go(view, run = db.run) { setMenu(false); db.run = run; db.view = view; keep('view.' + run, view); render(); $('in').focus(); }
+const enter = run => { const v = kept('view.' + run); go(views().includes(v) ? v : db.team.lead, run); };
+async function newRun(name) {
+  try { const r = await call('POST', '/api/runs', name ? { name } : {}); if (!db.runs.some(x => x.id === r.run.id)) db.runs.push(r.run); go(db.team.lead, r.run.id); }
+  catch (e) { out('error: ' + e.message, 'e'); }
+}
+function gone(id) {   // a run was deleted, here or in another page: the one next to it takes its place in view
+  const i = db.runs.findIndex(r => r.id === id); if (i < 0) return;
+  db.runs.splice(i, 1); db.sessions = db.sessions.filter(s => s.run_id !== id); db.mail = db.mail.filter(m => m.run_id !== id); newMail.delete(id); keep('view.' + id);
+  if (db.run !== id) return bar();
+  db.runs.length ? enter(db.runs[Math.min(i, db.runs.length - 1)].id) : newRun();
+}
+const cmdOf = c => { try { const a = JSON.parse(c.function.arguments); return c.function.name === 'shell' ? a.command : [c.function.name, ...Object.values(a).filter(v => typeof v !== 'object')].join(' '); } catch { return c.function.arguments; } };   // as in tools.js
+const sched = s => `[schedule #${s.id}${s.session ? ' · ' + s.session : ''} · next ${s.next_run}${s.every_minutes ? ' · every ' + s.every_minutes + ' min' : ''}] ${s.prompt}`;
+const fmt = r => r.error ? 'error: ' + r.error : r.schedules ? r.schedules.map(sched).join('\n') || '[no schedules]' : r.next_run ? sched(r) : r.file ? `sent ${r.file.path.split('/').pop()} · ${size(r.file.size)}` : 'text' in r ? r.text : !('exit_code' in r) ? JSON.stringify(r) :[r.stdout, r.stderr && '[stderr]\n' + r.stderr, r.note, `[exit ${r.exit_code} · ${(r.duration_ms / 1000).toFixed(1)}s]`].filter(Boolean).join('\n');
+const fmtMsg = m => { try { return fmt(JSON.parse(m.content)); } catch { return m.content; } };
+// Chips: an image opens in a new tab; a file is never previewed, whatever its type: the link downloads it.
+const size = n => n >= 1048576 ? +(n / 1048576).toFixed(1) + ' MB' : n >= 1024 ? Math.round(n / 1024) + ' KB' : n + ' B';
+const chipOf = (tag, name, tail) => { const c = el(tag, '', 'chip fx'); c.append(el('span', name), el('span', tail)); return c; };
+const fileChip = f => {
+  const n = f.path.split('/').pop(), a = chipOf('a', '↓ ' + n, ' · ' + size(f.size)); a.href = '/' + f.path.split('/').map(encodeURIComponent).join('/'); a.download = n; a.title = n;
+  return a;
+};
+const chipsOf = m => [...(m.images || []).map(p => {
+  const a = el('a', 'image · ' + p.split('.').pop(), 'chip'); a.href = '/' + p; a.title = p; a.target = '_blank'; a.rel = 'noopener';
+  return a;
+}), ...(m.files || []).map(fileChip)];
+const chips = m => { const c = chipsOf(m); if (c.length) out(c, 's'); };
+const isAuto = c => /^\[(background job|tool image|schedule #|team (message|notice) from|dispatch #)/.test(c);   // messages the server adds as role user (dispatch # only for notices stored by the removed dispatch tool)
+const show = m => {
+  if (m.role === 'user') { isAuto(m.content) ? out(m.content, 's') : out('> ' + m.content, 'u'); chips(m); }
+  else if (m.role === 'tool') {
+    let r = {}; try { r = JSON.parse(m.content); } catch {}
+    const t = fmtMsg(m), d = steps[m.tool_call_id];
+    if (d) { d.classList.toggle('e', !!(r.error || r.exit_code)); d.append(el('div', t)); }   // a failed step turns red
+    else out(t, 's');   // its call was compacted away
+    if (typeof r?.file?.path === 'string') out([fileChip(r.file)], 's');   // a file the agent sent: a chip below its step, not folded away
+  }
+  else {
+    if (m.content) out(md(m.content), 'md');
+    (m.tool_calls || []).forEach(step);
+  }
+};
+// A tool call as one folded line; its result, shown on click, lands in it.
+const step = c => { steps[c.id] = fold('$ ' + cmdOf(c)); };
+// A message between two agents: one folded line (time, from -> to, the first words), the whole text on click. A notice from the system is marked.
+const stamp = t => new Date(t).toLocaleString('sv').slice(5);   // MM-DD hh:mm:ss
+function row(m) {
+  const note = m.kind === 'notice', d = fold(`${stamp(m.created)}  ${m.from_agent} -> ${m.to_agent}  ${note ? '[notice] ' : ''}${m.content.replace(/\s+/g, ' ').slice(0, 200)}`);
+  d.append(el('div', `hop ${m.hops}\n${note ? m.from_agent + ' ' : ''}${m.content}`)); d.classList.toggle('w', note);
+}
+function render() {
+  live = null; steps = {}; log.innerHTML = ''; if (hdr) { log.append(hdr); hdr = null; }
+  const s = S();
+  if (db.view === MAIL) { newMail.delete(db.run); const m = mailOf(db.run); m.length ? m.forEach(row) : out('[no messages between the agents yet]', 's'); }
+  else if (s) { seen[s.id] = s.msgs.length; if (s.summary) fold('[summary] ' + s.summary); s.msgs.forEach(show); }
+  bar();
+}
+
+// Boot banner: types out while the page connects; its lines stay on top of the first render only. Any key/click skips the delay.
+let hdr = el('div'), skip = matchMedia('(prefers-reduced-motion:reduce)').matches;
+log.append(hdr);
+const booting = (async () => {
+  for (const t of ['TERIYAKI BIOS v1.0', 'memory check ........ OK', 'loading agent core .. OK', 'link /api/events .... OK', 'READY.', '']) { hdr.append(el('div', t, 's')); if (!skip) await new Promise(r => setTimeout(r, 120)); }
+})();
+addEventListener('keydown', () => skip = true); addEventListener('click', () => skip = true);
+
+// Keypress click: a 15ms square blip. The AudioContext waits for the first key (autoplay policy); /sound mutes it.
+let ac, mute = (() => { try { return localStorage.mute === '1'; } catch { return false; } })();
+const tick = () => {
+  if (mute) return;
+  ac ||= new AudioContext();
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'square'; o.frequency.value = 900 + Math.random() * 200; g.gain.value = .04;
+  o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + .015);
+};
+
+// Stopping is for the run: every agent of it, and the mail waiting for them (or one agent, and the mail waiting for it). Esc closes an open menu first.
+const stopRun = agent => call('POST', `/api/runs/${db.run}/abort` + (agent ? '?agent=' + agent : ''));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') menuOpen() ? setMenu(false) : db.run && stopRun().catch(() => {}); });
+$('stop').onclick = () => stopRun().catch(e => out('error: ' + e.message, 'e'));
+
+const find = x => agents().find(a => a.id === x || a.name.toLowerCase() === x.toLowerCase());
+const cmds = {
+  help: () => out('/new [name]  /ls  /use N  /rm N  /rename NAME  /view [AGENT]  /team [reload]  /stop [AGENT]  /schedules [cancel ID]  /mcp [reload | restart NAME]  /compact  /clear  /sound  /help  ·  [+] attach files (or drop or paste them)', 's'),
+  sound: () => { mute = !mute; try { localStorage.mute = +mute; } catch {} out('sound ' + (mute ? 'off' : 'on'), 's'); },
+  new: a => newRun(a.trim()),
+  ls: () => db.runs.forEach((r, i) => out(`${r.id === db.run ? '*' : ' '} ${i + 1}. ${r.name} (${db.sessions.filter(s => s.run_id === r.id).reduce((n, s) => n + s.msgs.length, 0)} msgs)${working(r.id).length ? ' · running' : ''}`, 's')),
+  use: async a => { const r = db.runs[a - 1]; if (!r) return out('no such run', 'e'); call('POST', `/api/runs/${r.id}/use`).catch(() => {}); enter(r.id); },   // the server notes it, so that a reload opens this run
+  rm: async a => { const r = db.runs[a - 1]; if (!r) return out('no such run', 'e'); await call('DELETE', `/api/runs/${r.id}`); gone(r.id); },   // the team is stopped first
+  rename: async a => { a = a.trim(); if (!a) return; await call('PUT', `/api/runs/${db.run}`, { name: a }); R().name = a; bar(); },
+  view: a => {   // the keyboard's way to the menu
+    a = a.trim();
+    if (!a) return out('views: ' + [...agents().map(x => x.id), 'messages'].map(v => (v === (db.view === MAIL ? 'messages' : db.view) ? '*' : '') + v).join('  '), 's');
+    const v = find(a)?.id ?? (/^(messages|team messages)$/i.test(a) ? MAIL : null);
+    v ? go(v) : out('no such view: ' + a, 'e');
+  },
+  team: async a => {
+    if (a.trim() === 'reload') { const r = await call('POST', '/api/team', { action: 'reload' }); return out(`[team.json read again: ${r.agents.length} agent(s)]` + r.warnings.map(w => '\nwarning: ' + w).join(''), 's'); }
+    if (a.trim()) return out('usage: /team [reload]', 'e');
+    const T = await call('GET', '/api/team'), walk = (id, depth) => { const x = T.agents.find(y => y.id === id); return [`${'  '.repeat(depth)}${x.id} · ${x.name} · ${x.role}${x.user_facing ? ' · you chat with it' : ''}${x.can_contact.length ? ' · contacts: ' + x.can_contact.join(', ') : ''}`, ...T.agents.filter(y => y.reports_to === id).flatMap(y => walk(y.id, depth + 1))]; };
+    out([...walk(T.lead, 0), ...T.held.map(h => `held: ${h.sessions} session(s) of "${h.agent}"${h.mail ? `, ${h.mail} message(s) waiting` : ''}${h.schedules ? `, ${h.schedules} schedule(s)` : ''}; not run until it is back in team.json`), ...T.warnings.map(w => 'warning: ' + w)].join('\n'), 's');
+  },
+  stop: async a => {   // the run, or one agent of it; the server says in the run's views what it stopped
+    a = a.trim(); const who = a && find(a); if (a && !who) return out('no such agent: ' + a, 'e');
+    const r = await stopRun(who?.id); if (!r.agents && !r.dropped) out('[nothing to stop]', 's');
+  },
+  clear: () => writable() && post('clear'),
+  compact: () => writable() && post('compact'),
+  schedules: async a => { const [c, id] = a.split(' '); const r = await (await fetch('/api/schedules', { method: 'POST', body: JSON.stringify(c === 'cancel' ? { action: 'cancel', id } : { action: 'list' }) })).json(); out(fmt(r), r.error ? 'e' : 's'); },   // all sessions
+  mcp: async a => {   // the MCP servers in mcp.json
+    const [c, name] = a.split(' ');
+    if (c) out(`[mcp ${c}${name ? ' ' + name : ''}…]`, 's');
+    const r = await (await (c ? fetch('/api/mcp', { method: 'POST', body: JSON.stringify({ action: c, name }) }) : fetch('/api/mcp'))).json();
+    if (r.error) return out('error: ' + r.error, 'e');
+    out(r.servers.map(s => `[${s.name} · ${s.type} · ${s.state}${s.state === 'ready' ? ` · ${s.tools} tools` : ''}]` + (s.error ? `\n  ${s.state === 'failed' ? '' : 'last error ' + new Date(s.error_at).toLocaleString('sv') + ': '}${s.error}` : '')).join('\n') || '[no MCP servers: add them in mcp.json]', 's');
+  },
+};
+
+// Starts a server job for the session in view: messages (a turn) or compact. The reply arrives as events.
+const post = (what, body) => call('POST', `/api/sessions/${S().id}/${what}`, body);
+// Attachments: a picked, dropped or pasted file uploads at once and waits as a chip above the input; the next message carries the paths of those that finished.
+let pending = [];   // {name, path, size}; no path while the upload runs
+const att = () => $('att').replaceChildren(...pending.map(p => {
+  const b = chipOf('button', p.name, ` · ${p.path ? size(p.size) : 'uploading…'} ×`); b.type = 'button'; b.title = 'remove ' + p.name; b.onclick = () => { pending = pending.filter(x => x !== p); att(); };
+  return b;
+}));
+async function attach(files) {
+  if (!writable()) return;   // a view of an agent that takes no files
+  for (const f of files) {
+    if (f.size > db.maxFile) { out(`error: ${f.name} is over the ${size(db.maxFile)} limit`, 'e'); continue; }
+    const p = { name: f.name }; pending.push(p); att();
+    try {
+      const r = await fetch('/api/uploads', { method: 'POST', headers: { 'X-Name': encodeURIComponent(f.name) }, body: f });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || r.status);
+      Object.assign(p, j, { name: j.path.split('/').pop() });   // shown under the name the agent will see
+    } catch (e) { pending = pending.filter(x => x !== p); out(`error: ${f.name}: ${e.message}`, 'e'); }
+    att();
+  }
+}
+const send = async v => { await post('messages', { content: v, files: pending.map(p => p.path) }); pending = []; att(); };
+// Input line or slash command. Slash commands work while a turn runs (/use, /ls...); a message waits until the session is idle.
+$('in').addEventListener('keydown', async e => {
+  if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Enter') tick();
+  if (e.key !== 'Enter') return;
+  const v = e.target.value.trim(); if (!v && (pinTry || !pending.length)) return;   // a message can be only files
+  if (pinTry) { e.target.value = ''; return pinTry(v); }   // while locked, a typed line is a PIN, not a command
+  if (v[0] !== '/' && !writable()) return;   // a view that takes no messages: the text stays in the field, the commands still work
+  if (v[0] !== '/' && isBusy()) return out('[busy: a turn is running in this session; wait or press Esc]', 'e');
+  if (v[0] !== '/' && pending.some(p => !p.path)) return out('[a file is still uploading: wait a moment]', 's');
+  e.target.value = '';
+  try {
+    if (v[0] === '/') { const [c, ...r] = v.slice(1).split(' '); await (cmds[c] || (() => out('unknown command', 'e')))(r.join(' ')); }
+    else await send(v);
+  } catch (err) { out('error: ' + err.message, 'e'); }
+  e.target.focus();
+});
+
+$('clip').onclick = () => { if (!pinTry && writable()) $('pick').click(); };
+$('pick').onchange = e => { attach([...e.target.files]); e.target.value = ''; $('in').focus(); };
+addEventListener('dragover', e => e.dataTransfer?.types.includes('Files') && e.preventDefault());   // only files: text can still be dropped into the input
+addEventListener('drop', e => { if (!e.dataTransfer?.files.length) return; e.preventDefault(); if (!pinTry) attach([...e.dataTransfer.files]); });
+$('in').addEventListener('paste', e => { const f = [...e.clipboardData.files]; if (f.length) { e.preventDefault(); if (!pinTry) attach(f); } });
+
+let painting = 0;
+const paint = () => { painting = 0; if (live) { live.replaceChildren(...md(live.raw)); log.scrollTop = log.scrollHeight; } };
+
+// Server events. Only the view is drawn; the rest of the mirror is kept current. Nothing that happens in the background ever changes the view: the menu shows the activity instead.
+// The one exception is a schedule that wakes an agent the user talks to, in a page that is idle (nothing running in the run in view, nothing typed): it switches to that run and agent, so its turn is visible.
+function onEvent({ sid, type, ...d }) {
+  if (type === 'init') {   // first event of every connection, also after a server restart: replaces the whole mirror
+    const was = db.run, view = db.view;
+    Object.assign(db, { team: d.team, runs: d.runs, sessions: d.sessions, mail: d.mail, maxFile: d.maxFile }); busy = new Set(d.busy);
+    for (const s of db.sessions) seen[s.id] ??= s.msgs.length;   // what is there when the page opens is not news
+    buildMenu();
+    db.run = db.runs.some(r => r.id === was) ? was : d.cur ?? null;   // the run in view stays, unless it is gone: then the one used last
+    db.view = db.run === was && views().includes(view) ? view : null;
+    booting.then(() => db.run ? db.view ? render() : enter(db.run) : newRun());   // the first render waits for the banner; later ones (reconnects) are immediate
+    return;
+  }
+  if (type === 'busy') { busy = new Set(d.sids); return bar(); }
+  if (type === 'team') {   // team.json was read again
+    db.team = d.team;
+    for (const n of d.sessions) { const i = db.sessions.findIndex(s => s.id === n.id); if (i < 0) db.sessions.push(n); else db.sessions[i] = n; seen[n.id] ??= n.msgs.length; }
+    db.sessions = db.sessions.filter(s => agentOf(s.agent));   // an agent that left keeps its sessions on the server, held and hidden
+    buildMenu();
+    return views().includes(db.view) ? bar() : go(db.team.lead);
+  }
+  if (type === 'run') {   // a run made, renamed or deleted
+    if (d.gone) return gone(d.gone);
+    const i = db.runs.findIndex(r => r.id === d.run.id);
+    if (i < 0) db.runs.push(d.run); else db.runs[i] = d.run;
+    return bar();
+  }
+  if (type === 'mail') {   // a message between two agents
+    db.mail.push(d.mail);
+    if (d.mail.run_id === db.run && db.view === MAIL) row(d.mail); else newMail.add(d.mail.run_id);
+    return bar();
+  }
+  const s = db.sessions.find(s => s.id === sid), cur = !!s && s === S();
+  if (type === 'line') return (cur || !sid || d.run && s?.run_id === db.run) && out(d.text, d.cls);   // d.run: the line is about the whole run, so any view of it shows it
+  if (type === 'session') {
+    const i = db.sessions.indexOf(s);
+    if (!d.session) return i >= 0 && (db.sessions.splice(i, 1), bar());
+    const same = s && s.summary === d.session.summary && s.msgs.length === d.session.msgs.length;   // a new name only changes nothing here
+    if (i < 0) db.sessions.push(d.session); else db.sessions[i] = d.session;
+    seen[sid] = Math.min(seen[sid] ?? Infinity, d.session.msgs.length);
+    return !same && d.session.run_id === db.run && d.session.agent === db.view ? render() : bar();   // compact or clear
+  }
+  if (!s) return;
+  if (type === 'delta') { if (cur) { live ||= out([], 'md'); live.raw = (live.raw || '') + d.text; painting ||= setTimeout(paint, 50); } }   // the reply so far, drawn as markdown every 50ms at most (a timer, not requestAnimationFrame: that stops in a background tab)
+  else if (type === 'msg') {
+    s.msgs.push(d.msg);
+    if (cur) { seen[s.id] = s.msgs.length; live?.remove(); live = null; show(d.msg); bar(); }
+    else {
+      bar();
+      if (/^\[schedule #/.test(d.msg.content) && agentOf(s.agent)?.user_facing && working(db.run).every(a => sessionOf(db.run, a.id) === s) && !$('in').value) { go(s.agent, s.run_id); out(`[switched to ${R().name} · ${agentOf(s.agent).name} for schedule]`, 's'); }
+    }
+  }
+  else if (type === 'pop') { s.msgs.pop(); if (cur) render(); }   // the turn failed before any reply
+}
+// Login: the server sends nothing before a PIN, and a 401 closes an EventSource for good (also after a server restart, which forgets every login). So ask for the PIN, then connect again.
+let pinTry = null;   // while the input line is the PIN prompt: called with each line typed
+const mask = on => Object.assign($('in'), { type: on ? 'password' : 'text', placeholder: on ? 'PIN' : hint() });
+const login = () => new Promise(done => {
+  mask(true); booting.then(() => out('ENTER PIN:', 's'));
+  pinTry = async pin => {
+    const r = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ pin }) }).catch(() => ({ status: 0 }));
+    if (!r.ok) return out(r.status === 429 ? 'LOCKED: wait a minute' : r.status === 401 ? 'ACCESS DENIED' : 'error: ' + (r.status || 'no connection'), 'e');
+    pinTry = null; mask(false); done();
+  };
+});
+const connect = () => {
+  const es = new EventSource('/api/events');
+  es.onmessage = e => onEvent(JSON.parse(e.data));   // reconnects by itself, and every connection starts with 'init'
+  es.onerror = () => es.readyState === EventSource.CLOSED && login().then(connect);
+};
+connect();
+</script>
