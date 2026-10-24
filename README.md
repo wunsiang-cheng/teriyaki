@@ -13,6 +13,8 @@ node server.js
 
 Open http://localhost:3000 and enter the PIN. `/help` lists the commands. Models are set in `core.js`: `MODEL` for chat (the default: an agent's `model` in `team.json` replaces it), `VISION_MODEL` for `view_image`, `TRANSCRIBE_MODEL` for `transcribe`, `MEDIA_MODEL` for `listen_audio` and `watch_video`, and `SPEECH_MODEL` for `speak`, with which the lead ends each turn with a short spoken report that plays in the page (`/voice` turns the playing off, Esc stops it).
 
+The default team (`team.json`, copied from `team.example.json` on the first start) is plan, do, check: you talk to `lead`, which plans and sets the acceptance criteria, `worker_1` does the work, and `worker_2` checks it independently and reports PASS or FAIL; a failure goes back to `worker_1` for up to two rounds of fixes. `/view` shows each agent, `/team` the setup.
+
 - `OPENROUTER_API_KEY`: required.
 - `PIN`: required. The page asks for it once per browser, and again after a server restart. The agent runs shell commands, so use 6+ characters you would not guess. It travels over plain HTTP: fine at home, not on a shared network.
 - `PORT`: default `3000`.
